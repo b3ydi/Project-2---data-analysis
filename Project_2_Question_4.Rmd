@@ -1,0 +1,199 @@
+---
+title: "Module 2 - Question 4"
+author: "Amadou Beydi Coulibaly"
+date: "2026-06-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+library(tidyverse)
+```
+
+# Task 4: Exploring the hospital length-of-stay dataset
+
+Before we can build a Bayesian regression for length of stay (Task 5), we need
+to understand the dataset: what the target variable looks like, which
+predictors are available, and any data-quality quirks that could bite us later.
+
+## 1. Loading the data and overview
+
+```{r load}
+mimic <- read_csv("mimic3d1.csv")
+dim(mimic)
+glimpse(mimic)
+```
+
+The dataset contains **58,976 hospital admissions and 28 variables**. Each row
+is one admission (`hadm_id`), with demographics (`gender`, `age`, `insurance`,
+`ethnicity`, ...), admission details (`admit_type`, `admit_location`,
+`AdmitDiagnosis`), a set of `Num*` columns measuring how intensively the
+hospital interacted with the patient (labs, prescriptions, notes, transfers,
+...), an in-hospital mortality flag (`ExpiredHospital`), and our target:
+**`LOSdays`**, the length of stay in days.
+
+## 2. The target variable: LOSdays
+
+```{r los-summary}
+mimic %>% summarise(
+  mean     = mean(LOSdays),  median = median(LOSdays),
+  sd       = sd(LOSdays),    min    = min(LOSdays),  max = max(LOSdays),
+  skew     = e1071::skewness(LOSdays),
+  p_over_2 = mean(LOSdays > 2)
+)
+```
+
+Three things stand out:
+
+* The distribution is **heavily right-skewed** (skewness ≈ 4.6): the median
+  stay is about 6.5 days, but the mean is pulled up to 10.1 days by a long
+  tail that reaches **295 days**.
+* **89.7% of admissions last longer than 2 days** — a useful empirical
+  baseline for the Task 5 question about the probability of "definitely
+  missing work".
+* There are **128 admissions with `LOSdays = 0`**, which matters whenever we
+  take logs.
+
+```{r los-hist, fig.width=9, fig.height=4.5}
+los_mean   <- mean(mimic$LOSdays)
+los_median <- median(mimic$LOSdays)
+
+ggplot(mimic, aes(LOSdays)) +
+  geom_histogram(binwidth = 1, fill = "#1F78B4", alpha = 0.85) +
+  geom_vline(xintercept = los_median, color = "#8F001A", linewidth = 1) +
+  geom_vline(xintercept = los_mean,   color = "#8F001A",
+             linewidth = 1, linetype = "dashed") +
+  annotate("text", x = los_median, y = Inf, vjust = 2, hjust = -0.1,
+           label = sprintf("Median = %.1f", los_median), color = "#8F001A", size = 3.5) +
+  annotate("text", x = los_mean, y = Inf, vjust = 4, hjust = -0.1,
+           label = sprintf("Mean = %.1f", los_mean), color = "#8F001A", size = 3.5) +
+  coord_cartesian(xlim = c(0, 60)) +   # zoom; tail extends to ~295 days
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 16, color = "#8F001A"),
+        plot.subtitle = element_text(size = 12, color = "grey40", margin = margin(b = 10))) +
+  labs(title = "Length of Stay is Heavily Right-Skewed",
+       subtitle = "Most stays are short, but a long tail pulls the mean above the median",
+       x = "Length of stay (days)", y = "Number of admissions")
+ggsave("task4_los_hist.pdf", width = 9, height = 4.5, units = "in")
+```
+
+A skewed, strictly-positive outcome is a poor fit for a plain normal
+likelihood. The standard remedy is to model the **log** of the outcome, so we
+check whether that helps:
+
+```{r los-log, fig.width=9, fig.height=4.5}
+mimic %>%
+  filter(LOSdays > 0) %>%                 # log undefined at 0 (drops 128 rows)
+  ggplot(aes(log(LOSdays))) +
+  geom_histogram(aes(y = after_stat(density)), bins = 40,
+                 fill = "#1F78B4", alpha = 0.85) +
+  stat_function(fun = dnorm, color = "#8F001A", linewidth = 1,
+                args = list(mean = mean(log(mimic$LOSdays[mimic$LOSdays > 0])),
+                            sd   = sd(log(mimic$LOSdays[mimic$LOSdays > 0])))) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 16, color = "#8F001A"),
+        plot.subtitle = element_text(size = 12, color = "grey40", margin = margin(b = 10))) +
+  labs(title = "On the Log Scale, Length of Stay is Roughly Normal",
+       subtitle = "Skewness falls from 4.6 to -0.5; a normal model is reasonable on log-days",
+       x = "log(Length of stay)", y = "Density")
+ggsave("task4_los_log.pdf", width = 9, height = 4.5, units = "in")
+```
+
+On the log scale the skewness drops from 4.6 to about −0.5 and the histogram
+tracks a normal curve closely. **This justifies using normal priors and a
+normal likelihood on `log(LOSdays)` in Task 5**, then transforming back to
+days to answer probability questions like P(LOS > 2).
+
+## 3. How LOS varies across admissions
+
+```{r los-by-type, fig.width=9, fig.height=4.5}
+mimic %>%
+  ggplot(aes(x = reorder(admit_type, LOSdays, median), y = LOSdays)) +
+  geom_boxplot(fill = "#1F78B4", alpha = 0.6, outlier.alpha = 0.1) +
+  coord_cartesian(ylim = c(0, 30)) +      # zoom past the outliers
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 16, color = "#8F001A")) +
+  labs(title = "Length of Stay by Admission Type",
+       x = NULL, y = "Length of stay (days)")
+ggsave("task4_los_by_type.pdf", width = 9, height = 4.5, units = "in")
+
+mimic %>%
+  group_by(admit_type) %>%
+  summarise(n = n(), median = median(LOSdays), mean = mean(LOSdays))
+```
+
+Emergency admissions dominate the data (about 71%). Urgent admissions stay
+longest (median 8.1 days). Newborns are an interesting subgroup: they have the
+**shortest median (4.1 days) but a high mean (11.5 days)** — most newborns go
+home quickly while a minority of NICU cases stay for weeks, another sign of
+the heavy right tail.
+
+```{r los-by-demo}
+mimic %>% group_by(gender) %>%
+  summarise(n = n(), median = median(LOSdays), mean = mean(LOSdays))
+
+summary(mimic$age)
+```
+
+Gender makes essentially no difference (median 6.4 vs 6.5 days). Age runs
+from 0 to 89 (capped at 89 for de-identification, and newborns all have
+age 0), with a typical patient around 59 years old.
+
+## 4. Numeric predictors: a caveat about the `Num*` columns
+
+```{r correlations}
+mimic %>%
+  select(where(is.numeric), -hadm_id, -LOSgroupNum) %>%
+  cor() %>%
+  as_tibble(rownames = "variable") %>%
+  select(variable, cor_with_LOS = LOSdays) %>%
+  filter(variable != "LOSdays") %>%
+  arrange(desc(abs(cor_with_LOS)))
+```
+
+```{r rates-check}
+mimic %>% select(LOSdays, NumRx, NumLabs, NumNotes, NumCallouts) %>% head()
+```
+
+Two findings here:
+
+* All linear correlations with `LOSdays` are **weak** (|r| ≤ 0.21), so no
+  single predictor will explain LOS by itself.
+* The `Num*` columns contain **non-integer values** (e.g. 14.91
+  prescriptions), so they are **per-day rates, not raw counts** — the totals
+  have already been divided by the length of stay. That explains why several
+  of them correlate *negatively* with LOS: short stays tend to be intense
+  (many interactions per day), long stays less so. We should keep this in
+  mind when interpreting regression coefficients in Task 5.
+
+## 5. Data quality
+
+```{r missingness}
+mimic %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "n_missing") %>%
+  filter(n_missing > 0) %>%
+  arrange(desc(n_missing))
+
+# AdmitProcedure hides its missing values as the literal string "na"
+mimic %>% summarise(admitproc_na = sum(AdmitProcedure == "na"))
+```
+
+Genuine `NA`s are confined to `marital_status` (10,128), `religion` (458) and
+`AdmitDiagnosis` (25). In addition, `AdmitProcedure` encodes missingness as
+the literal string `"na"` in 8,032 rows — a trap if we ever filter with
+`is.na()` alone.
+
+## Key takeaways for Task 5
+
+1. `LOSdays` is strictly positive and heavily right-skewed; **model it on the
+   log scale**, where it is approximately normal — consistent with the hint
+   to use normal priors.
+2. The 128 zero-day stays must be handled (dropped or offset) before taking
+   logs.
+3. **89.7% of stays already exceed 2 days**, so the posterior probability of
+   staying longer than 2 days should come out high.
+4. The `Num*` predictors are per-day rates with weak linear correlations to
+   LOS — useful covariates, but their signs need careful interpretation.
+5. Missingness is mild and concentrated in demographic fields; watch out for
+   the `"na"` strings in `AdmitProcedure`.
