@@ -32,10 +32,70 @@ hospital interacted with the patient (labs, prescriptions, notes, transfers,
 ...), an in-hospital mortality flag (`ExpiredHospital`), and our target:
 **`LOSdays`**, the length of stay in days.
 
-## 2. The target variable: LOSdays
+## 2. Data quality and cleaning
+
+Before any analysis we diagnose and fix what can be fixed. Three issues
+surface: genuine `NA`s in the demographic fields, missing values *hidden* as
+the literal string `"na"`, and admissions with a recorded stay of zero days.
+
+```{r diagnose}
+# (a) Genuine NAs
+mimic %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "n_missing") %>%
+  filter(n_missing > 0) %>%
+  arrange(desc(n_missing))
+
+# (b) Missingness hidden as the string "na"
+mimic %>%
+  summarise(across(where(is.character), ~ sum(. == "na", na.rm = TRUE))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "n_na_string") %>%
+  filter(n_na_string > 0)
+
+# (c) Zero-day stays: who are they?
+mimic %>%
+  filter(LOSdays == 0) %>%
+  summarise(n = n(), died_in_hospital = sum(ExpiredHospital))
+
+# (d) No duplicate admissions
+sum(duplicated(mimic$hadm_id))
+```
+
+What we found, and how we fix it:
+
+* **Genuine `NA`s** are confined to `marital_status` (10,128), `religion`
+  (458) and `AdmitDiagnosis` (25). These are categorical, so we don't drop
+  rows: `marital_status` already has an `UNKNOWN (DEFAULT)` level and
+  `religion` a `NOT SPECIFIED` level, so we merge the `NA`s into those
+  existing "unknown" categories.
+* **`AdmitProcedure` hides missingness as the literal string `"na"`**
+  (8,032 rows) — invisible to `is.na()`. We recode it to a true `NA`,
+  interpreted as "no procedure recorded at admission".
+* **128 admissions have `LOSdays = 0`**, and 95 of them (74%) died in
+  hospital: these are stays too short to register, not usable measurements
+  of length of stay — and the log transform we will need is undefined at 0.
+  We drop them.
+* `hadm_id` has no duplicates, so no de-duplication is needed.
+
+```{r clean}
+mimic_clean <- mimic %>%
+  mutate(
+    AdmitProcedure = na_if(AdmitProcedure, "na"),
+    marital_status = replace_na(marital_status, "UNKNOWN (DEFAULT)"),
+    religion       = replace_na(religion, "NOT SPECIFIED"),
+    AdmitDiagnosis = replace_na(AdmitDiagnosis, "UNKNOWN")
+  ) %>%
+  filter(LOSdays > 0)
+
+nrow(mimic_clean)   # 58,848 admissions remain (99.8% of the original)
+```
+
+**All results below use the cleaned data (58,848 admissions).**
+
+## 3. The target variable: LOSdays
 
 ```{r los-summary}
-mimic %>% summarise(
+mimic_clean %>% summarise(
   mean     = mean(LOSdays),  median = median(LOSdays),
   sd       = sd(LOSdays),    min    = min(LOSdays),  max = max(LOSdays),
   skew     = e1071::skewness(LOSdays),
@@ -43,22 +103,20 @@ mimic %>% summarise(
 )
 ```
 
-Three things stand out:
+Two things stand out:
 
 * The distribution is **heavily right-skewed** (skewness ≈ 4.6): the median
   stay is about 6.5 days, but the mean is pulled up to 10.1 days by a long
   tail that reaches **295 days**.
-* **89.7% of admissions last longer than 2 days** — a useful empirical
+* **89.8% of admissions last longer than 2 days** — a useful empirical
   baseline for the Task 5 question about the probability of "definitely
   missing work".
-* There are **128 admissions with `LOSdays = 0`**, which matters whenever we
-  take logs.
 
 ```{r los-hist, fig.width=9, fig.height=4.5}
-los_mean   <- mean(mimic$LOSdays)
-los_median <- median(mimic$LOSdays)
+los_mean   <- mean(mimic_clean$LOSdays)
+los_median <- median(mimic_clean$LOSdays)
 
-ggplot(mimic, aes(LOSdays)) +
+ggplot(mimic_clean, aes(LOSdays)) +
   geom_histogram(binwidth = 1, fill = "#1F78B4", alpha = 0.85) +
   geom_vline(xintercept = los_median, color = "#8F001A", linewidth = 1) +
   geom_vline(xintercept = los_mean,   color = "#8F001A",
@@ -78,18 +136,16 @@ ggsave("task4_los_hist.pdf", width = 9, height = 4.5, units = "in")
 ```
 
 A skewed, strictly-positive outcome is a poor fit for a plain normal
-likelihood. The standard remedy is to model the **log** of the outcome, so we
-check whether that helps:
+likelihood. The standard remedy is to model the **log** of the outcome —
+possible now that the zero-day stays have been removed:
 
 ```{r los-log, fig.width=9, fig.height=4.5}
-mimic %>%
-  filter(LOSdays > 0) %>%                 # log undefined at 0 (drops 128 rows)
-  ggplot(aes(log(LOSdays))) +
+ggplot(mimic_clean, aes(log(LOSdays))) +
   geom_histogram(aes(y = after_stat(density)), bins = 40,
                  fill = "#1F78B4", alpha = 0.85) +
   stat_function(fun = dnorm, color = "#8F001A", linewidth = 1,
-                args = list(mean = mean(log(mimic$LOSdays[mimic$LOSdays > 0])),
-                            sd   = sd(log(mimic$LOSdays[mimic$LOSdays > 0])))) +
+                args = list(mean = mean(log(mimic_clean$LOSdays)),
+                            sd   = sd(log(mimic_clean$LOSdays)))) +
   theme_minimal() +
   theme(plot.title = element_text(face = "bold", size = 16, color = "#8F001A"),
         plot.subtitle = element_text(size = 12, color = "grey40", margin = margin(b = 10))) +
@@ -104,10 +160,10 @@ tracks a normal curve closely. **This justifies using normal priors and a
 normal likelihood on `log(LOSdays)` in Task 5**, then transforming back to
 days to answer probability questions like P(LOS > 2).
 
-## 3. How LOS varies across admissions
+## 4. How LOS varies across admissions
 
 ```{r los-by-type, fig.width=9, fig.height=4.5}
-mimic %>%
+mimic_clean %>%
   ggplot(aes(x = reorder(admit_type, LOSdays, median), y = LOSdays)) +
   geom_boxplot(fill = "#1F78B4", alpha = 0.6, outlier.alpha = 0.1) +
   coord_cartesian(ylim = c(0, 30)) +      # zoom past the outliers
@@ -117,7 +173,7 @@ mimic %>%
        x = NULL, y = "Length of stay (days)")
 ggsave("task4_los_by_type.pdf", width = 9, height = 4.5, units = "in")
 
-mimic %>%
+mimic_clean %>%
   group_by(admit_type) %>%
   summarise(n = n(), median = median(LOSdays), mean = mean(LOSdays))
 ```
@@ -129,20 +185,20 @@ home quickly while a minority of NICU cases stay for weeks, another sign of
 the heavy right tail.
 
 ```{r los-by-demo}
-mimic %>% group_by(gender) %>%
+mimic_clean %>% group_by(gender) %>%
   summarise(n = n(), median = median(LOSdays), mean = mean(LOSdays))
 
-summary(mimic$age)
+summary(mimic_clean$age)
 ```
 
-Gender makes essentially no difference (median 6.4 vs 6.5 days). Age runs
+Gender makes essentially no difference (median ≈ 6.5 days for both). Age runs
 from 0 to 89 (capped at 89 for de-identification, and newborns all have
 age 0), with a typical patient around 59 years old.
 
-## 4. Numeric predictors: a caveat about the `Num*` columns
+## 5. Numeric predictors: a caveat about the `Num*` columns
 
 ```{r correlations}
-mimic %>%
+mimic_clean %>%
   select(where(is.numeric), -hadm_id, -LOSgroupNum) %>%
   cor() %>%
   as_tibble(rownames = "variable") %>%
@@ -152,7 +208,7 @@ mimic %>%
 ```
 
 ```{r rates-check}
-mimic %>% select(LOSdays, NumRx, NumLabs, NumNotes, NumCallouts) %>% head()
+mimic_clean %>% select(LOSdays, NumRx, NumLabs, NumNotes, NumCallouts) %>% head()
 ```
 
 Two findings here:
@@ -166,34 +222,15 @@ Two findings here:
   (many interactions per day), long stays less so. We should keep this in
   mind when interpreting regression coefficients in Task 5.
 
-## 5. Data quality
-
-```{r missingness}
-mimic %>%
-  summarise(across(everything(), ~ sum(is.na(.)))) %>%
-  pivot_longer(everything(), names_to = "variable", values_to = "n_missing") %>%
-  filter(n_missing > 0) %>%
-  arrange(desc(n_missing))
-
-# AdmitProcedure hides its missing values as the literal string "na"
-mimic %>% summarise(admitproc_na = sum(AdmitProcedure == "na"))
-```
-
-Genuine `NA`s are confined to `marital_status` (10,128), `religion` (458) and
-`AdmitDiagnosis` (25). In addition, `AdmitProcedure` encodes missingness as
-the literal string `"na"` in 8,032 rows — a trap if we ever filter with
-`is.na()` alone.
-
 ## Key takeaways for Task 5
 
-1. `LOSdays` is strictly positive and heavily right-skewed; **model it on the
+1. The cleaned dataset (58,848 admissions) has explicit "unknown" categories
+   instead of `NA`s, true `NA`s instead of `"na"` strings, and no zero-day
+   stays — so `log(LOSdays)` is always defined.
+2. `LOSdays` is strictly positive and heavily right-skewed; **model it on the
    log scale**, where it is approximately normal — consistent with the hint
    to use normal priors.
-2. The 128 zero-day stays must be handled (dropped or offset) before taking
-   logs.
-3. **89.7% of stays already exceed 2 days**, so the posterior probability of
+3. **89.8% of stays exceed 2 days**, so the posterior probability of
    staying longer than 2 days should come out high.
 4. The `Num*` predictors are per-day rates with weak linear correlations to
    LOS — useful covariates, but their signs need careful interpretation.
-5. Missingness is mild and concentrated in demographic fields; watch out for
-   the `"na"` strings in `AdmitProcedure`.
