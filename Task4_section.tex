@@ -1,0 +1,150 @@
+% ============================================================
+% Task 4 section — paste in place of "\section{Task 4:}"
+% Requires figures produced by Project_2_Question_4.Rmd:
+%   task4_los_hist.pdf, task4_los_log.pdf, task4_los_by_type.pdf
+% ============================================================
+
+\section{Task 4: Exploring the Hospital Length-of-Stay Data}
+
+\subsection{Data Overview}
+The second engagement concerns hospital capacity planning. The data set
+(\texttt{mimic3d.csv}, derived from the MIMIC-III critical-care database)
+contains \textbf{58{,}976 hospital admissions and 28 variables}. Each record is
+one admission and combines patient demographics, admission details, measures
+of how intensively the hospital interacted with the patient, and our target
+variable: \texttt{LOSdays}, the length of stay in days.
+Table~\ref{tab:mimic_dictionary} summarizes the main variable groups.
+
+\begin{table}[H]
+\centering
+\caption{Key variables in the length-of-stay data set}
+\label{tab:mimic_dictionary}
+\begin{threeparttable}
+\begin{tabular}{p{3.2cm} p{2.3cm} p{7cm}}
+\toprule
+\textbf{Variable(s)} & \textbf{Data Type} & \textbf{Description} \\
+\midrule
+\texttt{LOSdays} & Numeric & Length of the hospital stay in days (the target variable). \\
+\addlinespace
+\texttt{gender}, \texttt{age}, \texttt{insurance}, \texttt{ethnicity}, \dots & Categorical / Integer & Patient demographics. Age is capped at 89 for de-identification; newborns are recorded as age 0. \\
+\addlinespace
+\texttt{admit\_type}, \texttt{admit\_location}, \texttt{AdmitDiagnosis} & Categorical & Circumstances of the admission (elective, emergency, urgent, or newborn) and the admitting diagnosis. \\
+\addlinespace
+\texttt{NumLabs}, \texttt{NumRx}, \texttt{NumNotes}, \dots & Numeric & Intensity of hospital--patient interactions (laboratory tests, prescriptions, clinical notes, transfers, \dots), expressed \emph{per day of stay}. \\
+\addlinespace
+\texttt{ExpiredHospital} & Binary (0/1) & In-hospital mortality flag (9.9\% of admissions). \\
+\bottomrule
+\end{tabular}
+\end{threeparttable}
+\end{table}
+
+\subsection{The Target Variable: Length of Stay}
+Table~\ref{tab:los_summary} summarizes the distribution of \texttt{LOSdays}.
+
+\begin{table}[H]
+\centering
+\caption{Summary statistics of length of stay (days)}
+\label{tab:los_summary}
+\begin{threeparttable}
+\begin{tabular}{r r r r r r r}
+\toprule
+\textbf{Mean} & \textbf{Median} & \textbf{Std.\ Dev.} & \textbf{Min} & \textbf{Max} & \textbf{Skewness} & \textbf{P(LOS \(>\) 2)} \\
+\midrule
+10.11 & 6.46 & 12.46 & 0.00 & 294.63 & 4.55 & 89.7\% \\
+\bottomrule
+\end{tabular}
+\end{threeparttable}
+\end{table}
+
+Three features matter for the modelling in Task~5. First, the distribution is
+\textbf{heavily right-skewed} (skewness $\approx 4.6$): the median stay is
+about 6.5 days, but a long tail reaching 295 days pulls the mean up to
+10.1 days (Figure~\ref{fig:los_hist}). Second, \textbf{89.7\% of admissions
+already exceed two days}, a useful empirical baseline for the probability
+question posed in Task~5. Third, 128 admissions record a stay of exactly
+zero days, which must be handled before any logarithmic transformation.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\linewidth]{task4_los_hist.pdf}
+\caption{Distribution of length of stay (axis truncated at 60 days; the tail
+extends to 295 days). The solid line marks the median, the dashed line the mean.}
+\label{fig:los_hist}
+\end{figure}
+
+A skewed, strictly positive outcome is a poor fit for a normal likelihood on
+the raw scale. Figure~\ref{fig:los_log} shows that after a log
+transformation the distribution becomes approximately normal: the skewness
+falls from $4.6$ to $-0.5$ and the histogram closely tracks the fitted normal
+curve. \textbf{This justifies modelling \(\log(\texttt{LOSdays})\) with a
+normal likelihood and normal priors in Task~5}, transforming back to days to
+answer probability questions such as \(P(\text{LOS} > 2)\).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\linewidth]{task4_los_log.pdf}
+\caption{Length of stay on the log scale, with a fitted normal density.}
+\label{fig:los_log}
+\end{figure}
+
+\subsection{Length of Stay Across Admission Types}
+Figure~\ref{fig:los_by_type} and Table~\ref{tab:los_by_type} break the stays
+down by admission type. Emergency admissions dominate the data (71\% of
+records). Urgent admissions stay longest (median 8.1 days). Newborns are a
+distinctive subgroup: they show the \emph{shortest median} (4.1 days) but a
+\emph{high mean} (11.5 days), because most newborns go home quickly while a
+minority of intensive-care cases stay for weeks. Gender, by contrast, makes
+essentially no difference (median 6.4 vs.\ 6.5 days for women and men).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\linewidth]{task4_los_by_type.pdf}
+\caption{Length of stay by admission type (axis truncated at 30 days).}
+\label{fig:los_by_type}
+\end{figure}
+
+\begin{table}[H]
+\centering
+\caption{Length of stay by admission type}
+\label{tab:los_by_type}
+\begin{threeparttable}
+\begin{tabular}{l r r r}
+\toprule
+\textbf{Admission Type} & \textbf{Admissions} & \textbf{Median LOS} & \textbf{Mean LOS} \\
+\midrule
+Newborn   & 7{,}863  & 4.08 & 11.50 \\
+\addlinespace
+Elective  & 7{,}706  & 6.29 & 8.86 \\
+\addlinespace
+Emergency & 42{,}071 & 6.88 & 10.02 \\
+\addlinespace
+Urgent    & 1{,}336  & 8.08 & 12.28 \\
+\bottomrule
+\end{tabular}
+\end{threeparttable}
+\end{table}
+
+\subsection{Numeric Predictors and Data Quality}
+Two findings shape how the interaction variables should be used in Task~5.
+First, all linear correlations with \texttt{LOSdays} are \textbf{weak}
+($|r| \le 0.21$; the strongest are \texttt{NumCallouts} at $-0.21$ and
+\texttt{NumRx} at $-0.17$), so no single predictor explains length of stay by
+itself. Second, the \texttt{Num*} columns contain non-integer values (e.g.\
+14.91 prescriptions), revealing that they are \textbf{per-day rates rather
+than raw counts}: the totals have already been divided by the length of stay.
+This explains the negative correlations -- short stays tend to be intense,
+with many interactions per day -- and it means the signs of the corresponding
+regression coefficients must be interpreted with care.
+
+Missingness is mild and concentrated in demographic fields:
+\texttt{marital\_status} (10{,}128 records), \texttt{religion} (458) and
+\texttt{AdmitDiagnosis} (25). In addition, \texttt{AdmitProcedure} encodes
+missing values as the literal string \texttt{"na"} in 8{,}032 records, which
+a standard missing-value check would silently overlook.
+
+\textbf{Takeaways for Task~5.} Model length of stay on the log scale with
+normal priors; drop or offset the 128 zero-day stays before taking logs;
+expect a high posterior probability for \(P(\text{LOS} > 2)\), since 89.7\%
+of observed stays already exceed two days; and treat the per-day
+\texttt{Num*} rates as covariates whose signs reflect intensity of care, not
+duration.
